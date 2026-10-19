@@ -37,3 +37,7 @@ with the moment ids you configure. The app also sets an MQTT Last Will (`off`), 
 if the app crashes or is killed.
 
 The app's UI text is in Italian. `CLAUDE.md` contains notes for working on the code with Claude Code.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
