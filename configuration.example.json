@@ -1,0 +1,168 @@
+{
+  "version": 3,
+  "device_name": "led-farmaci",
+  "moments": [
+    {
+      "id": "before_breakfast",
+      "name": "Before breakfast"
+    },
+    {
+      "id": "after_breakfast",
+      "name": "After breakfast"
+    },
+    {
+      "id": "lunch",
+      "name": "Lunch"
+    },
+    {
+      "id": "before_dinner",
+      "name": "Before dinner"
+    },
+    {
+      "id": "after_dinner",
+      "name": "After dinner"
+    },
+    {
+      "id": "meals_insulin_pen",
+      "name": "Meals insulin pen"
+    },
+    {
+      "id": "night_insulin_pen",
+      "name": "Night insulin pen"
+    },
+    {
+      "id": "non_dialysis_days_medicines",
+      "name": "Non-dialysis days medicines"
+    }
+  ],
+  "strips": [
+    {
+      "name": "Medicine shelf",
+      "gpio": 18,
+      "num_leds": 62,
+      "segments": [
+        {
+          "name": "Medicine 1",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "before_breakfast"
+          ]
+        },
+        {
+          "name": "Medicine 2",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "after_breakfast"
+          ]
+        },
+        {
+          "name": "Medicine 3",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "after_breakfast"
+          ]
+        },
+        {
+          "name": "Medicine 4",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "lunch"
+          ]
+        },
+        {
+          "name": "Medicine 5",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "lunch",
+            "after_dinner"
+          ]
+        },
+        {
+          "name": "Medicine 6",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "before_dinner"
+          ]
+        },
+        {
+          "name": "Medicine 7",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "after_dinner"
+          ]
+        },
+        {
+          "name": "Medicine 8",
+          "leds": 6,
+          "gap_after": 1,
+          "moments": [
+            "after_breakfast",
+            "after_dinner"
+          ]
+        },
+        {
+          "name": "Medicine 9",
+          "leds": 6,
+          "gap_after": 0,
+          "moments": [
+            "non_dialysis_days_medicines"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Meals insulin pen",
+      "gpio": 19,
+      "num_leds": 6,
+      "segments": [
+        {
+          "name": "Meals insulin pen",
+          "leds": 6,
+          "gap_after": 0,
+          "moments": [
+            "meals_insulin_pen"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Night insulin pen",
+      "gpio": 21,
+      "num_leds": 6,
+      "segments": [
+        {
+          "name": "Night insulin pen",
+          "leds": 6,
+          "gap_after": 0,
+          "moments": [
+            "night_insulin_pen"
+          ]
+        }
+      ]
+    }
+  ],
+  "connections": {
+    "mqtt_broker": "io.adafruit.com",
+    "mqtt_port": 1883,
+    "mqtt_username": "your-adafruit-username",
+    "mqtt_keepalive": 30,
+    "command_feed": "led-farmaci-command",
+    "feedback_feed": "led-farmaci-feedback",
+    "topics": {
+      "command": "your-adafruit-username/feeds/led-farmaci-command",
+      "feedback": "your-adafruit-username/feeds/led-farmaci-feedback"
+    }
+  },
+  "pulse": {
+    "on_ms": 700,
+    "off_ms": 400,
+    "transition_ms": 400
+  }
+}

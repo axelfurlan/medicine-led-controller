@@ -1,0 +1,62 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+A medicine-reminder system with three parts that share one MQTT protocol (Adafruit IO):
+
+1. **`medicine_led_configurator.py`**: Tkinter GUI (stdlib only) that generates the firmware config.
+2. **`led-farmaci.yaml`**: ESPHome config for an ESP32 (`esp32dev`, Arduino framework) driving 1–5 WS2812 LED strips. **Generated file**.
+3. **`MedicineLedController/`**: Android app (Kotlin, Gradle) that publishes commands over MQTT from a floating overlay button.
+
+There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it and do not search in it. Your own `configuration.json`, `led-farmaci.yaml` and `secrets.yaml` are git-ignored too; the repo ships `configuration.example.json` and `secrets.example.yaml` with dummy data, and `MedicineLedController/app/src/main/assets/configuration.json` is a dummy copy for the app.
+
+## Generated files: edit the generator, not the output
+
+`led-farmaci.yaml` and `configuration.json` are written by the configurator. The YAML header says "Automatically generated". Hand edits to the YAML are lost the next time the configurator saves. Change `generate_yaml` in `medicine_led_configurator.py` instead, then regenerate.
+
+- The configurator's model functions are module-level and Tk-free, so they can be tested headless: `default_config`, `compute_layout`, `validate_config`, `generate_yaml`, `read_secrets`/`write_secrets`. The `Configurator` class is only the UI (dark ttk theme on `clam`).
+- `configuration.json` (`"version": 3`; version 2 is migrated on load, anything older falls back to defaults) contains:
+  - `moments`: each has `id` and `name`. The id is the command payload.
+  - `strips`: up to 5. Each has `gpio`, `num_leds` and an ordered list of `segments`, each with `leds`, `gap_after` and the `moments` (ids) it belongs to.
+  - `connections`: MQTT settings plus `command_feed` and `feedback_feed`.
+  - `pulse`: `on_ms`, `off_ms` and `transition_ms`, used globally.
+- Segment LED indices are not stored. They are computed in order: each segment starts after the previous one plus its `gap_after`. Insulin pens are just strips with one segment; there is no special case.
+- On startup the GUI auto-loads `configuration.json` and `secrets.yaml` from the script folder. If the JSON isn't version 3, it starts from `default_config()` instead. The suggested GPIOs (`SUGGESTED_GPIOS`: 16, 17, 18, 19, 21) are the ones wired on the current hardware.
+- Credentials (`wifi_ssid`, `wifi_password`, `ota_password`, `adafruit_io_key`) go only into `secrets.yaml` (gitignored). The YAML references them via `!secret`. Never embed them in the YAML or JSON.
+
+## Firmware behaviour (`led-farmaci.yaml`)
+
+- Boot and MQTT disconnect: all LEDs red with the `lampeggio_errore` blink script. MQTT `on_connect` clears this and shows steady red.
+- Each moment `<id>` has an `on_message` handler on the single command topic (filtered with `payload: "<id>"`; `off` turns everything off) and a `lampeggio_<id>` script. The script blinks green the segments assigned to that moment, while all other segments stay red. `modalita_attiva` (global) holds the active moment ID.
+- Entity IDs: `strip_<n>` is the physical strip (internal). `seg_<n>_<m>` is a partition named after the segment.
+- `rmt_symbols` is 128 for up to 4 strips and 64 for 5, so the ESP32's 512 RMT symbols are not exceeded.
+- The device publishes feedback to the feedback feed: `OK:<moment id>`, `OK:spento` (off) or `ERRORE:payload_non_valido`. The moment IDs `nessuna`, `spento`, `errore` and `off` are reserved. Unknown command payloads get `ERRORE:payload_non_valido` from a catch-all handler.
+
+## MQTT protocol (shared contract)
+
+There are only two feeds, so the free Adafruit IO plan (10 feeds) is never a limit. Commands go to `<user>/feeds/<command_feed>` (`led-farmaci-command`) with the moment id as payload, or `off` to turn everything off. The device answers on `<feedback_feed>`. The app also subscribes to `<user>/errors` and `<user>/throttle`.
+
+**The app is not generated from the configuration.** `Command.kt` hardcodes each button's payload, which must equal a moment id in `configuration.json`, and the ack (`OK:<id>`). Keep `Command.kt` and the configured moment ids in sync by hand, and re-copy `configuration.json` into the app's assets. Adafruit IO throttles publishing, and the app's ACK timeout is 10 s.
+
+## Commands
+
+```
+python medicine_led_configurator.py      # GUI; "Generate YAML…" also writes configuration.json + secrets.yaml
+python -c "import medicine_led_configurator as m; c=m.default_config(); print(m.validate_config(c))"   # headless check
+esphome config led-farmaci.yaml          # validate
+esphome run led-farmaci.yaml             # compile + flash/OTA
+esphome logs led-farmaci.yaml
+cd MedicineLedController && ./gradlew assembleDebug    # Android build (gradlew.bat on Windows)
+```
+
+## Android app (`MedicineLedController/app/src/main/java/com/medicinled/controller/`)
+
+- `MqttController`: singleton Paho `MqttAsyncClient` shared by the activity and the overlay. It is reference-counted via `acquire()`/`release()`, so the connection stays open while any screen uses it. `State` is pushed to listeners on the main thread. It handles the pending → active command lifecycle and the banner.
+- `OverlayService`: foreground service that draws the draggable floating button and `CommandPanel` over other apps (needs the "Display over other apps" permission).
+- `Command.kt`: the command list (UI tiles and topic mapping). `AppSettings`: SharedPreferences for the Adafruit IO username and key. `MainActivity`: settings screen.
+- `MedicineCatalog` reads `app/src/main/assets/configuration.json` (a **copy** of the root file: re-copy it after reconfiguring) to list the medicines of the active command in `CommandPanel`'s active view. Moment ids are matched to `Command.ack`; `Command.displayNames` overrides this for Lokelma and the pens.
+- Safety: `MqttController` sets an MQTT Last Will (`off` on the command feed) and sends all-off before a clean disconnect or after a reconnect while a command is active. Keep this when touching connection code.
+- Port 8883 uses TLS, 1883 is plain. UI strings are in Italian.
+- `MedicineLedController.zip` in the root is an archived copy of the app. Don't edit it.

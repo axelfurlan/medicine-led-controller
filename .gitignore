@@ -1,0 +1,18 @@
+# Private data: never commit these
+/secrets.yaml
+/configuration.json
+/led-farmaci.yaml
+
+# ESPHome build output
+.esphome/
+
+# Python
+__pycache__/
+
+# Android / Gradle / IDE
+.gradle/
+.idea/
+.kotlin/
+build/
+local.properties
+*.apk
