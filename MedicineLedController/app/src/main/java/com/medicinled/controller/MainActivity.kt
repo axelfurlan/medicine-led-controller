@@ -2,6 +2,7 @@ package com.medicinled.controller
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -32,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var mqttStatus: TextView
     private lateinit var deviceStatus: TextView
     private lateinit var overlayButton: Button
+    private lateinit var updateButton: Button
     private lateinit var panel: CommandPanel
 
     private val listener: (MqttController.State) -> Unit = { render(it) }
@@ -72,6 +74,14 @@ class MainActivity : Activity() {
         root.addView(Button(this).apply { text = "Salva e connetti"; setOnClickListener { saveSettings() } })
         status = TextView(this).apply { textSize = 15f; setPadding(0, dp(8), 0, 0) }
         root.addView(status)
+
+        section(root, "Firmware")
+        root.addView(TextView(this).apply {
+            text = "Scarica e installa l'ultima versione del firmware sul dispositivo, anche fuori casa."
+            textSize = 14f; setTextColor(Color.DKGRAY)
+        })
+        updateButton = Button(this).apply { text = "Aggiorna firmware ESP32"; setOnClickListener { confirmFirmwareUpdate() } }
+        root.addView(updateButton)
 
         val settings = AppSettings.load(this)
         host.setText(settings.host)
@@ -119,6 +129,7 @@ class MainActivity : Activity() {
 
     private fun render(state: MqttController.State) {
         panel.render(state)
+        updateButton.isEnabled = state.connection == MqttController.Connection.CONNECTED
         val (label, color) = CommandPanel.connectionLabel(state)
         mqttStatus.text = "MQTT / Adafruit IO: $label" + (state.connectionError?.let { "\n$it" } ?: "")
         mqttStatus.setTextColor(if (state.connection == MqttController.Connection.CONNECTED) Color.rgb(24, 121, 78) else color)
@@ -127,6 +138,15 @@ class MainActivity : Activity() {
         } else {
             "Dispositivo: ultima risposta alle ${DateFormat.getTimeFormat(this).format(state.lastFeedbackAt)} (${state.lastFeedback})"
         }
+    }
+
+    private fun confirmFirmwareUpdate() {
+        AlertDialog.Builder(this)
+            .setTitle("Aggiornare il firmware?")
+            .setMessage("Il dispositivo scarica la nuova versione e si riavvia: i LED restano spenti per circa un minuto. Non togliere l'alimentazione durante l'aggiornamento.")
+            .setNegativeButton("Annulla", null)
+            .setPositiveButton("Aggiorna") { _, _ -> MqttController.requestFirmwareUpdate() }
+            .show()
     }
 
     private fun toggleOverlay() {

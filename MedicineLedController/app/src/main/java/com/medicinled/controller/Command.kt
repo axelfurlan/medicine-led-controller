@@ -33,6 +33,10 @@ enum class Command(
         const val COMMAND_FEED = "led-farmaci-command"
         const val FEEDBACK_FEED = "led-farmaci-feedback"
 
+        /** Not a tile: asks the firmware to download and flash the latest build (settings screen only). */
+        const val UPDATE_PAYLOAD = "update"
+        const val UPDATE_ACK = "aggiornamento"
+
         fun fromAck(ack: String): Command? = entries.firstOrNull { it.ack == ack }
     }
 }

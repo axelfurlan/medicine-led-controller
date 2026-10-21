@@ -155,6 +155,8 @@
     "mqtt_keepalive": 30,
     "command_feed": "led-farmaci-command",
     "feedback_feed": "led-farmaci-feedback",
+    "firmware_url": "",
+    "firmware_repo": "",
     "topics": {
       "command": "your-adafruit-username/feeds/led-farmaci-command",
       "feedback": "your-adafruit-username/feeds/led-farmaci-feedback"

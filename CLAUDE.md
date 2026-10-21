@@ -34,6 +34,12 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
 - `rmt_symbols` is 128 for up to 4 strips and 64 for 5, so the ESP32's 512 RMT symbols are not exceeded.
 - The device publishes feedback to the feedback feed: `OK:<moment id>`, `OK:spento` (off) or `ERRORE:payload_non_valido`. The moment IDs `nessuna`, `spento`, `errore` and `off` are reserved. Unknown command payloads get `ERRORE:payload_non_valido` from a catch-all handler.
 
+## Remote OTA (optional)
+
+Set `connections.firmware_url` (HTTPS raw URL of `firmware.ota.bin` in a **private** repo; `<url>.md5` must sit beside it) and the `github_token` secret (read-only fine-grained token). The generator then adds `http_request`, `ota: http_request` and an `update` payload on the command feed: the device acks `OK:aggiornamento`, downloads with basic auth (`x-access-token` + token) and reboots. `update` is a reserved moment id. The LAN `ota: esphome` stays as fallback. Never publish the `.bin` in a public repo: it embeds Wi-Fi, AIO and OTA secrets.
+
+Release: click **Publish firmware…** in the configurator (bottom bar). It regenerates `led-farmaci.yaml`/`configuration.json`/`secrets.yaml`, runs `esphome compile`, copies `firmware.ota.bin` + `.md5` into the local clone (`connections.firmware_repo`, default `../farmaci-firmware`, cloned if missing) and commits/pushes with the user's git credentials. Then tap "Aggiorna firmware ESP32" in the app settings (confirmation dialog; not in the overlay panel). `esphome` is on the user PATH; the configurator also falls back to the ESPHome Device Builder `Scripts\esphome.exe`. The first flash with this firmware still goes over the LAN with `esphome run led-farmaci.yaml --device <ip>`.
+
 ## MQTT protocol (shared contract)
 
 There are only two feeds, so the free Adafruit IO plan (10 feeds) is never a limit. Commands go to `<user>/feeds/<command_feed>` (`led-farmaci-command`) with the moment id as payload, or `off` to turn everything off. The device answers on `<feedback_feed>`. The app also subscribes to `<user>/errors` and `<user>/throttle`.

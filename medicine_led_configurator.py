@@ -9,8 +9,14 @@ Generates:
   - secrets.yaml (credentials; never embedded in the generated firmware)
 """
 
+import hashlib
 import json
+import os
+import queue
 import re
+import shutil
+import subprocess
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -22,8 +28,9 @@ MAX_STRIPS = 5
 SUGGESTED_GPIOS = (16, 17, 18, 19, 21)
 # ESP32 pins able to drive a data line (6-11 are flash, 34-39 are input-only).
 VALID_OUTPUT_GPIOS = (0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33)
-RESERVED_MODE_IDS = {"nessuna", "spento", "errore", "off"}
+RESERVED_MODE_IDS = {"nessuna", "spento", "errore", "off", "update"}
 OFF_PAYLOAD = "off"
+UPDATE_PAYLOAD = "update"
 DEFAULT_COMMAND_FEED = "led-farmaci-command"
 DEFAULT_FEEDBACK_FEED = "led-farmaci-feedback"
 DEFAULT_MOMENTS = (
@@ -118,6 +125,8 @@ def default_config():
             "mqtt_keepalive": 30,
             "command_feed": DEFAULT_COMMAND_FEED,
             "feedback_feed": DEFAULT_FEEDBACK_FEED,
+            "firmware_url": "",
+            "firmware_repo": "",
         },
         "pulse": dict(DEFAULT_PULSE),
     }
@@ -236,6 +245,9 @@ def validate_config(cfg):
         errors.append("Enter your MQTT username.")
     if int(conn.get("mqtt_keepalive", 0)) < 1:
         errors.append("MQTT keepalive must be at least 1 second.")
+    firmware_url = conn.get("firmware_url", "").strip()
+    if firmware_url and not (firmware_url.startswith("https://") and firmware_url.endswith(".bin")):
+        errors.append("The firmware URL must start with https:// and end with .bin (or be left empty).")
     return errors
 
 
@@ -244,6 +256,7 @@ def generate_yaml(cfg):
     pulse = cfg["pulse"]
     on_ms, off_ms, transition_ms = int(pulse["on_ms"]), int(pulse["off_ms"]), int(pulse["transition_ms"])
     username = conn["mqtt_username"].strip()
+    firmware_url = conn.get("firmware_url", "").strip()
     feedback_topic = mqtt_topic(username, conn["feedback_feed"])
     command_topic = mqtt_topic(username, conn["command_feed"])
     moments = cfg["moments"]
@@ -349,6 +362,13 @@ def generate_yaml(cfg):
     add("ota:")
     add("  - platform: esphome")
     add("    password: !secret ota_password")
+    if firmware_url:
+        add("  - platform: http_request")
+        add("    id: ota_remoto")
+        add("")
+        add("http_request:")
+        add("  timeout: 30s")
+        add("  watchdog_timeout: 60s")
     add("")
     add("logger:")
     add("  level: DEBUG")
@@ -388,8 +408,22 @@ def generate_yaml(cfg):
     for moment in moments:
         on_command(moment["id"], f">>> {moment['name']} ({moment['id']})", moment["id"], f"OK:{moment['id']}", True)
     on_command(OFF_PAYLOAD, ">>> ALL OFF: STEADY RED", "nessuna", "OK:spento", False)
+    if firmware_url:
+        # Remote update: the device downloads <firmware_url> (+ ".md5") from a private repo over HTTPS.
+        pad = " " * 10
+        add(f"    - topic: {yaml_quote(command_topic)}")
+        add(f"      payload: {yaml_quote(UPDATE_PAYLOAD)}")
+        add("      then:")
+        add(f"{pad}- logger.log: '>>> REMOTE FIRMWARE UPDATE'")
+        publish(pad, "OK:aggiornamento")
+        add(f"{pad}- ota.http_request.flash:")
+        add(f"{pad}    id: ota_remoto")
+        add(f"{pad}    url: {yaml_quote(firmware_url)}")
+        add(f"{pad}    md5_url: {yaml_quote(firmware_url + '.md5')}")
+        add(f"{pad}    username: x-access-token")
+        add(f"{pad}    password: !secret github_token")
     # Any other payload on the command feed is reported back instead of being ignored silently.
-    known = " && ".join(f'x != "{payload}"' for payload in mode_ids + [OFF_PAYLOAD])
+    known = " && ".join(f'x != "{payload}"' for payload in mode_ids + [OFF_PAYLOAD] + ([UPDATE_PAYLOAD] if firmware_url else []))
     add(f"    - topic: {yaml_quote(command_topic)}")
     add("      then:")
     add("        - if:")
@@ -454,7 +488,82 @@ def generate_yaml(cfg):
     add('# wifi_password: "YOUR_WIFI_PASSWORD"')
     add('# ota_password: "YOUR_OTA_PASSWORD"')
     add('# adafruit_io_key: "YOUR_ADAFRUIT_IO_KEY"')
+    if firmware_url:
+        add('# github_token: "READ-ONLY FINE-GRAINED TOKEN OF THE PRIVATE FIRMWARE REPO"')
     return "\n".join(lines) + "\n"
+
+
+def write_project_files(cfg, directory):
+    """Write led-farmaci.yaml and configuration.json into directory."""
+    directory = Path(directory)
+    (directory / f"{DEVICE_NAME}.yaml").write_text(generate_yaml(cfg), encoding="utf-8")
+    (directory / "configuration.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def find_esphome():
+    """Command (list) that runs ESPHome. The Device Builder's Scripts\\esphome.exe launcher is broken, so use its python."""
+    device_builder_python = Path(os.environ.get("LOCALAPPDATA", "")) / "ESPHome Device Builder" / "python" / "python.exe"
+    if device_builder_python.exists():
+        return [str(device_builder_python), "-m", "esphome"]
+    found = shutil.which("esphome")
+    if found:
+        return [found]
+    raise RuntimeError("ESPHome not found: install it or add the esphome command to PATH.")
+
+
+def run_logged(cmd, cwd, log):
+    """Run cmd, sending each output line to log(); raises RuntimeError on a non-zero exit."""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "GIT_TERMINAL_PROMPT": "0"}
+    log("$ " + " ".join([Path(cmd[0]).name] + cmd[1:]))
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    for line in proc.stdout:
+        log(line.rstrip())
+    if proc.wait() != 0:
+        raise RuntimeError(f"{Path(cmd[0]).name} failed (exit code {proc.returncode}).")
+
+
+def firmware_repo_dir(conn):
+    return Path(conn.get("firmware_repo", "").strip() or SCRIPT_DIR.parent / "farmaci-firmware")
+
+
+def publish_firmware(cfg, secrets, log):
+    """Compile the firmware and push firmware.ota.bin + .md5 to the private firmware repository."""
+    conn = cfg["connections"]
+    match = re.match(r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/", conn.get("firmware_url", "").strip())
+    if not match:
+        raise RuntimeError("Set the firmware URL (https://raw.githubusercontent.com/<user>/<repo>/<branch>/firmware.ota.bin).")
+    if not secrets.get("github_token", "").strip():
+        raise RuntimeError("Enter the GitHub token.")
+    repo = firmware_repo_dir(conn)
+
+    write_project_files(cfg, SCRIPT_DIR)
+    write_secrets(SCRIPT_DIR / "secrets.yaml", secrets)
+    run_logged(find_esphome() + ["compile", f"{DEVICE_NAME}.yaml"], SCRIPT_DIR, log)
+    build_dir = SCRIPT_DIR / ".esphome" / "build" / DEVICE_NAME
+    # ESP-IDF based builds write to build/, PlatformIO ones to .pioenvs/<name>/.
+    candidates = [build_dir / "build" / "firmware.ota.bin", build_dir / ".pioenvs" / DEVICE_NAME / "firmware.ota.bin"]
+    built = next((path for path in candidates if path.exists()), None)
+    if not built:
+        raise RuntimeError("Compiled firmware not found in " + " or ".join(str(path) for path in candidates))
+
+    if (repo / ".git").exists():
+        run_logged(["git", "pull", "--ff-only"], repo, log)
+    else:
+        run_logged(["git", "clone", f"https://github.com/{match.group(1)}/{match.group(2)}.git", str(repo)], SCRIPT_DIR, log)
+    shutil.copyfile(built, repo / "firmware.ota.bin")
+    md5 = hashlib.md5(built.read_bytes()).hexdigest()
+    (repo / "firmware.ota.bin.md5").write_text(md5, encoding="utf-8")
+    log(f"md5 {md5}")
+
+    run_logged(["git", "add", "firmware.ota.bin", "firmware.ota.bin.md5"], repo, log)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo).returncode == 0:
+        log("Nothing changed in the repository.")
+    else:
+        run_logged(["git", "commit", "-m", f"Firmware {time.strftime('%Y-%m-%d %H:%M:%S')}"], repo, log)
+        run_logged(["git", "push"], repo, log)
+    log("Done. Tap 'Aggiorna firmware ESP32' in the app.")
 
 
 def write_secrets(path, secrets):
@@ -696,6 +805,9 @@ class Configurator(tk.Tk):
         self.wifi_ssid = tk.StringVar()
         self.wifi_password = tk.StringVar()
         self.ota_password = tk.StringVar()
+        self.github_token = tk.StringVar()
+        self.firmware_url = tk.StringVar()
+        self.firmware_repo = tk.StringVar()
         self.mqtt_broker = tk.StringVar()
         self.mqtt_port = tk.StringVar()
         self.mqtt_username = tk.StringVar()
@@ -762,6 +874,8 @@ class Configurator(tk.Tk):
         self.status_label.pack(side="left")
         ttk.Button(bar, text="Generate YAML…", style="Accent.TButton", command=self.save_yaml).pack(
             side="right")
+        self.publish_button = ttk.Button(bar, text="Publish firmware…", command=self.publish_ui)
+        self.publish_button.pack(side="right", padx=8)
         ttk.Button(bar, text="Validate", command=self.validate_ui).pack(side="right", padx=8)
         ttk.Button(bar, text="Save…", command=self.save_json).pack(side="right")
         ttk.Button(bar, text="Load…", command=self.load_json).pack(side="right", padx=8)
@@ -1160,6 +1274,11 @@ class Configurator(tk.Tk):
             ("Wi-Fi password", self.wifi_password, secret),
             ("OTA password", self.ota_password, secret),
         ))
+        self._form(self._card(inner, "Remote firmware update (optional)"), (
+            ("Firmware .bin URL", self.firmware_url, {"width": 60}),
+            ("GitHub token", self.github_token, secret),
+            ("Local repo folder", self.firmware_repo, {"width": 60}),
+        ))
         self._form(self._card(inner, "MQTT / Adafruit IO"), (
             ("Broker", self.mqtt_broker, {}),
             ("Port", self.mqtt_port, {"width": 10}),
@@ -1241,6 +1360,8 @@ class Configurator(tk.Tk):
                 "mqtt_keepalive": number(self.mqtt_keepalive, "MQTT keepalive"),
                 "command_feed": command_feed,
                 "feedback_feed": feedback_feed,
+                "firmware_url": self.firmware_url.get().strip(),
+                "firmware_repo": self.firmware_repo.get().strip(),
                 "topics": topics,
             },
             "pulse": {
@@ -1268,6 +1389,8 @@ class Configurator(tk.Tk):
         self.mqtt_keepalive.set(str(conn["mqtt_keepalive"]))
         self.command_feed.set(str(conn["command_feed"]))
         self.feedback_feed.set(str(conn["feedback_feed"]))
+        self.firmware_url.set(str(conn["firmware_url"]))
+        self.firmware_repo.set(str(conn["firmware_repo"]))
         pulse = {**DEFAULT_PULSE, **cfg.get("pulse", {})}
         self.pulse_on.set(str(pulse["on_ms"]))
         self.pulse_off.set(str(pulse["off_ms"]))
@@ -1283,6 +1406,7 @@ class Configurator(tk.Tk):
         self.wifi_password.set(str(secrets.get("wifi_password", "")))
         self.ota_password.set(str(secrets.get("ota_password", "")))
         self.mqtt_key.set(str(secrets.get("adafruit_io_key", "")))
+        self.github_token.set(str(secrets.get("github_token", "")))
 
     def _collect_secrets(self):
         return {
@@ -1290,6 +1414,7 @@ class Configurator(tk.Tk):
             "wifi_password": self.wifi_password.get(),
             "ota_password": self.ota_password.get(),
             "adafruit_io_key": self.mqtt_key.get(),
+            "github_token": self.github_token.get(),
         }
 
     def _load_startup_config(self):
@@ -1395,6 +1520,61 @@ class Configurator(tk.Tk):
             "Firmware generated",
             f"Created files:\n- {path}\n- {json_path}\n- {secrets_path}\n\n"
             "Keep secrets.yaml private. Do not upload it when sharing the project.")
+
+    def publish_ui(self):
+        cfg = self._checked_config()
+        if not cfg:
+            return
+        if not messagebox.askyesno(
+                "Publish firmware",
+                "Compile the firmware and upload it to the private firmware repository?\n\n"
+                "Afterwards, tap 'Aggiorna firmware ESP32' in the app to update the device.\n"
+                "This overwrites led-farmaci.yaml, configuration.json and secrets.yaml in the project folder."):
+            return
+        secrets = self._collect_secrets()
+        win = tk.Toplevel(self)
+        win.title("Publish firmware")
+        win.geometry("820x480")
+        win.configure(background=COLORS["bg"])
+        text = tk.Text(win, background=COLORS["input"], foreground=COLORS["text"], font=("Consolas", 9),
+                       wrap="none", state="disabled", borderwidth=0)
+        text.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        close = ttk.Button(win, text="Close", command=win.destroy, state="disabled")
+        close.pack(side="right", padx=12, pady=(0, 12))
+        lines = queue.Queue()
+        result = {"ok": False}
+
+        def work():
+            try:
+                publish_firmware(cfg, secrets, lines.put)
+                result["ok"] = True
+            except Exception as exc:
+                lines.put(f"ERROR: {exc}")
+            lines.put(None)
+
+        def pump():
+            if not win.winfo_exists():
+                return
+            try:
+                while True:
+                    line = lines.get_nowait()
+                    if line is None:
+                        close.state(["!disabled"])
+                        self.publish_button.state(["!disabled"])
+                        ok = result["ok"]
+                        self.set_status("Firmware published." if ok else "Firmware publish failed.", "ok" if ok else "error")
+                        return
+                    text.configure(state="normal")
+                    text.insert("end", line + "\n")
+                    text.see("end")
+                    text.configure(state="disabled")
+            except queue.Empty:
+                win.after(100, pump)
+
+        self.publish_button.state(["disabled"])
+        self.set_status("Publishing firmware…", "muted")
+        threading.Thread(target=work, daemon=True).start()
+        pump()
 
 
 if __name__ == "__main__":

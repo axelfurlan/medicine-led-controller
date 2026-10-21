@@ -111,6 +111,29 @@ object MqttController {
         showBanner(BannerKind.SENDING, "Comando inviato…", "In attesa di conferma dal dispositivo", autoHide = false)
     }
 
+    /** Asks the device to flash the latest firmware; it answers "OK:aggiornamento" and then reboots. */
+    fun requestFirmwareUpdate() {
+        val c = client
+        if (c == null || !c.isConnected) {
+            showBanner(BannerKind.ERROR, "Non connesso", "Controlla Internet e le impostazioni MQTT.")
+            return
+        }
+        try {
+            c.publish(commandTopic(), Command.UPDATE_PAYLOAD.toByteArray(), 1, false, null, object : IMqttActionListener {
+                override fun onSuccess(token: IMqttToken?) {}
+                override fun onFailure(token: IMqttToken?, e: Throwable?) {
+                    main.post { failSend(e) }
+                }
+            })
+        } catch (e: MqttException) {
+            failSend(e)
+            return
+        }
+        main.removeCallbacks(ackTimeout)
+        main.postDelayed(ackTimeout, ACK_TIMEOUT_MS)
+        showBanner(BannerKind.SENDING, "Richiesta inviata…", "In attesa di conferma dal dispositivo", autoHide = false)
+    }
+
     private fun failSend(e: Throwable?) {
         main.removeCallbacks(ackTimeout)
         update(state.copy(pending = null))
@@ -210,6 +233,11 @@ object MqttController {
         }
         val now = System.currentTimeMillis()
         when {
+            payload == "OK:${Command.UPDATE_ACK}" -> {
+                main.removeCallbacks(ackTimeout)
+                update(state.copy(pending = null, active = null, lastFeedback = payload, lastFeedbackAt = now))
+                showBanner(BannerKind.SUCCESS, "Aggiornamento avviato", "Il dispositivo si riavvia tra circa un minuto")
+            }
             payload.startsWith("OK:") -> {
                 val command = Command.fromAck(payload.removePrefix("OK:"))
                 main.removeCallbacks(ackTimeout)
