@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from secrets import token_bytes
+from secrets import choice, token_bytes
 from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 
@@ -430,6 +430,12 @@ def generate_yaml(cfg):
     add("  # for an answer that never comes before retrying.")
     add("  on_connect:")
     add("    - mqtt.enable:")
+    add("  # Fallback hotspot: if the Wi-Fi can't be joined, the device opens this protected hotspot and a captive")
+    add("  # portal where a new network can be chosen, so the Wi-Fi can change without a cable or a reflash.")
+    add("  ap:")
+    add("    password: !secret ap_password")
+    add("")
+    add("captive_portal:")
     add("")
     add("api:")
     add("  encryption:")
@@ -624,6 +630,7 @@ def generate_yaml(cfg):
     add('# ota_password: "YOUR_OTA_PASSWORD"')
     add('# adafruit_io_key: "YOUR_ADAFRUIT_IO_KEY"')
     add('# api_encryption_key: "BASE64 KEY, 32 RANDOM BYTES (the configurator generates it)"')
+    add('# ap_password: "FALLBACK HOTSPOT PASSWORD, 8-63 CHARACTERS (the configurator generates it)"')
     if firmware_url:
         add('# github_token: "READ-ONLY FINE-GRAINED TOKEN OF THE PRIVATE FIRMWARE REPO"')
     return "\n".join(lines) + "\n"
@@ -638,6 +645,23 @@ def security_warnings(cfg):
             f"MQTT port {port} is not encrypted: your Adafruit IO key and every command travel in clear text. "
             f"Use port {TLS_MQTT_PORT} (TLS).")
     return warnings
+
+
+AP_PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyzACDEFGHJKLMNPQRSTUVWXYZ23456789"  # no look-alike characters
+
+
+def new_ap_password():
+    """A fresh fallback-hotspot password that is easy to read out and type (10 characters)."""
+    return "".join(choice(AP_PASSWORD_ALPHABET) for _ in range(10))
+
+
+def validate_secrets(secrets):
+    """Problems in the credentials that ESPHome or the Wi-Fi hotspot would reject, as messages."""
+    errors = []
+    ap_password = secrets.get("ap_password", "")
+    if not (8 <= len(ap_password) <= 63 and ap_password.isascii() and ap_password.isprintable()):
+        errors.append("The hotspot password must be 8 to 63 printable ASCII characters (WPA2).")
+    return errors
 
 
 def new_api_key():
@@ -970,6 +994,7 @@ class Configurator(tk.Tk):
         self.ota_password = tk.StringVar()
         self.github_token = tk.StringVar()
         self.api_key = tk.StringVar()
+        self.ap_password = tk.StringVar()
         self.firmware_url = tk.StringVar()
         self.firmware_repo = tk.StringVar()
         self.status_led_gpio = tk.StringVar()
@@ -1500,6 +1525,7 @@ class Configurator(tk.Tk):
             ("Wi-Fi password", self.wifi_password, secret),
             ("OTA password", self.ota_password, secret),
             ("API encryption key", self.api_key, {**secret, "width": 50}),
+            ("Hotspot password", self.ap_password, secret),
         ))
         self._form(self._card(inner, "Remote firmware update (optional)"), (
             ("Firmware .bin URL", self.firmware_url, {"width": 60}),
@@ -1639,11 +1665,15 @@ class Configurator(tk.Tk):
         self.mqtt_key.set(str(secrets.get("adafruit_io_key", "")))
         self.github_token.set(str(secrets.get("github_token", "")))
         self.api_key.set(str(secrets.get("api_encryption_key", "")))
+        self.ap_password.set(str(secrets.get("ap_password", "")))
 
     def _collect_secrets(self):
         if not self.api_key.get().strip():
             self.api_key.set(new_api_key())
+        if not self.ap_password.get().strip():
+            self.ap_password.set(new_ap_password())
         return {
+            "ap_password": self.ap_password.get().strip(),
             "api_encryption_key": self.api_key.get().strip(),
             "wifi_ssid": self.wifi_ssid.get(),
             "wifi_password": self.wifi_password.get(),
@@ -1738,6 +1768,10 @@ class Configurator(tk.Tk):
             self.set_status(f"Loaded {Path(path).name}.", "ok")
 
     def _confirm_security(self, cfg):
+        problems = validate_secrets(self._collect_secrets())
+        if problems:
+            messagebox.showerror("Check the credentials", "\n".join(problems))
+            return False
         warnings = security_warnings(cfg)
         return not warnings or messagebox.askyesno(
             "Unencrypted connection", "\n\n".join(warnings) + "\n\nContinue anyway?")
