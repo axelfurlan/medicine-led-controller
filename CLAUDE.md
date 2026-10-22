@@ -28,6 +28,7 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
 
 ## Firmware behaviour (`led-farmaci.yaml`)
 
+- MQTT starts only once Wi-Fi is connected (`mqtt: enable_on_boot: false` + `wifi: on_connect: mqtt.enable`). Starting it at boot made the broker lookup fail instantly (no network yet) and ESPHome then waited a fixed 20 s before retrying.
 - Boot and MQTT disconnect: all LEDs red with the `lampeggio_errore` blink script. MQTT `on_connect` clears this and shows steady red.
 - Each moment `<id>` has an `on_message` handler on the single command topic (filtered with `payload: "<id>"`; `off` turns everything off) and a `lampeggio_<id>` script. The script blinks green the segments assigned to that moment, while all other segments stay red. `modalita_attiva` (global) holds the active moment ID.
 - Entity IDs: `strip_<n>` is the physical strip (internal). `seg_<n>_<m>` is a partition named after the segment.

@@ -426,6 +426,10 @@ def generate_yaml(cfg):
     add("wifi:")
     add("  ssid: !secret wifi_ssid")
     add("  password: !secret wifi_password")
+    add("  # MQTT starts only once Wi-Fi is up: a broker lookup at boot fails at once, and ESPHome then waits 20 s")
+    add("  # for an answer that never comes before retrying.")
+    add("  on_connect:")
+    add("    - mqtt.enable:")
     add("")
     add("api:")
     add("  encryption:")
@@ -464,6 +468,7 @@ def generate_yaml(cfg):
     add("")
     add("mqtt:")
     add(f"  broker: {yaml_quote(conn['mqtt_broker'])}")
+    add("  enable_on_boot: false")
     add(f"  port: {int(conn['mqtt_port'])}")
     if int(conn["mqtt_port"]) == TLS_MQTT_PORT:
         add("  certificate_authority: |")
