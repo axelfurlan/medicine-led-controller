@@ -24,7 +24,7 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
   - `pulse`: `on_ms`, `off_ms` and `transition_ms`, used globally.
 - Segment LED indices are not stored. They are computed in order: each segment starts after the previous one plus its `gap_after`. Insulin pens are just strips with one segment; there is no special case. The data is stored in shelf order (left to right), but the strip card lists the rows from the board (LED 0) to the far end, so with `right_to_left` the rows are shown reversed and the LED ranges always ascend down the table. The gaps (unlit LEDs) are positions on the shelf: `gap_before` on the strip (left end), `gap_after` on each segment (to its right; on the last segment it is the gap at the right end), and a gap keeps its position when segments are moved. A strip with `right_to_left: true` has LED 0 at the right end, so the numbering runs from the right (`compute_full_layout(segments, right_to_left, gap_before)`); the edge gaps count as used LEDs. Configs without `gap_before` are migrated on load: it is set to 0 and the old (ignored) last `gap_after` is zeroed.
 - On startup the GUI auto-loads `configuration.json` and `secrets.yaml` from the script folder. If the JSON isn't version 3, it starts from `default_config()` instead. The suggested GPIOs (`SUGGESTED_GPIOS`: 16, 17, 18, 19, 21) are the ones wired on the current hardware.
-- Credentials (`wifi_ssid`, `wifi_password`, `ota_password`, `adafruit_io_key`) go only into `secrets.yaml` (gitignored). The YAML references them via `!secret`. Never embed them in the YAML or JSON.
+- Credentials (`wifi_ssid`, `wifi_password`, `ota_password`, `adafruit_io_key`, `api_encryption_key`, `github_token`) go only into `secrets.yaml` (gitignored). The YAML references them via `!secret`. Never embed them in the YAML or JSON.
 
 ## Firmware behaviour (`led-farmaci.yaml`)
 
@@ -33,6 +33,12 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
 - Entity IDs: `strip_<n>` is the physical strip (internal). `seg_<n>_<m>` is a partition named after the segment.
 - `rmt_symbols` is 128 for up to 4 strips and 64 for 5, so the ESP32's 512 RMT symbols are not exceeded.
 - The device publishes feedback to the feedback feed: `OK:<moment id>`, `OK:spento` (off) or `ERRORE:payload_non_valido`. The moment IDs `nessuna`, `spento`, `errore` and `off` are reserved. Unknown command payloads get `ERRORE:payload_non_valido` from a catch-all handler.
+
+## Security: MQTT and API
+
+- The device must use MQTT over TLS (port 8883, `TLS_MQTT_PORT`). On the ESP32, ESPHome encrypts MQTT **only when `certificate_authority` is set**, so `generate_yaml` embeds `ADAFRUIT_IO_CA` (DigiCert Global Root G2, the root of Adafruit IO's chain, valid to 2038) whenever the port is 8883; the hostname is verified. Port 1883 is plain text (the AIO key is sent in clear): the configurator asks for confirmation (`security_warnings`) and the app shows a warning. If Adafruit ever changes its root, update `ADAFRUIT_IO_CA` and re-flash over the LAN (USB/LAN OTA); the remote `update` command needs MQTT.
+- The ESPHome native API is encrypted (`api: encryption: key: !secret api_encryption_key`); the configurator generates the key (`new_api_key`) when it is empty. `esphome logs --device <ip>` reads it from `secrets.yaml`.
+- After switching a device from 1883 to 8883, rotate the AIO key (it was sent in clear text), update it in `secrets.yaml` and the app, and flash the device over USB/LAN right away. Wait 60 s after any update before power-cycling (OTA rollback).
 
 ## On-board status LED (optional)
 

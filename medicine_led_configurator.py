@@ -9,6 +9,7 @@ Generates:
   - secrets.yaml (credentials; never embedded in the generated firmware)
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from secrets import token_bytes
 from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 
@@ -38,6 +40,34 @@ DEFAULT_MOMENTS = (
     "Meals insulin pen", "Night insulin pen", "Non-dialysis days medicines",
 )
 DEFAULT_PULSE = {"on_ms": 700, "off_ms": 400, "transition_ms": 400}
+TLS_MQTT_PORT = 8883
+# Root of Adafruit IO's certificate chain (*.adafruit.com -> GeoTrust TLS RSA CA G1 -> DigiCert Global Root G2, valid
+# until 2038-01-15; SHA-256 CB:3C:CB:B7:60:31:E5:E0:13:8F:8D:D3:9A:23:F9:DE:47:FF:C3:5E:43:C1:14:4C:EA:27:D4:6A:5A:B1:CB:5F).
+# ESPHome only encrypts MQTT on the ESP32 when a certificate authority is configured. If Adafruit changes its root,
+# update this and re-flash the device over the LAN.
+ADAFRUIT_IO_CA = """-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
+2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
+1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
+q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
+tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
+vIOlCsRnKPZzFBQ9RnbDhxSJITRNrw9FDKZJobq7nMWxM4MphQIDAQABo0IwQDAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4EFgQUTiJUIBiV
+5uNu5g/6+rkS7QYXjzkwDQYJKoZIhvcNAQELBQADggEBAGBnKJRvDkhj6zHd6mcY
+1Yl9PMWLSn/pvtsrF9+wX3N3KjITOYFnQoQj8kVnNeyIv/iPsGEMNKSuIEyExtv4
+NeF22d+mQrvHRAiGfzZ0JFrabA0UWTW98kndth/Jsw1HKj2ZL7tcu7XUIOGZX1NG
+Fdtom/DzMNU+MeKNhJ7jitralj41E6Vf8PlwUHBHQRFXGU7Aj64GxJUTFy8bJZ91
+8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe
+pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
+MrY=
+-----END CERTIFICATE-----
+"""
 MOMENT_ID_RE = re.compile(r"[a-z][a-z0-9_]*")
 FEED_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 MOMENT_COLUMNS = 3
@@ -120,7 +150,7 @@ def default_config():
         ],
         "connections": {
             "mqtt_broker": "io.adafruit.com",
-            "mqtt_port": 1883,
+            "mqtt_port": TLS_MQTT_PORT,
             "mqtt_username": "",
             "mqtt_keepalive": 30,
             "command_feed": DEFAULT_COMMAND_FEED,
@@ -398,6 +428,8 @@ def generate_yaml(cfg):
     add("  password: !secret wifi_password")
     add("")
     add("api:")
+    add("  encryption:")
+    add("    key: !secret api_encryption_key")
     add("")
     add("ota:")
     add("  - platform: esphome")
@@ -433,6 +465,12 @@ def generate_yaml(cfg):
     add("mqtt:")
     add(f"  broker: {yaml_quote(conn['mqtt_broker'])}")
     add(f"  port: {int(conn['mqtt_port'])}")
+    if int(conn["mqtt_port"]) == TLS_MQTT_PORT:
+        add("  certificate_authority: |")
+        for line in ADAFRUIT_IO_CA.splitlines():
+            add(f"    {line}")
+    else:
+        add("  # WARNING: this port is not encrypted; the Adafruit IO key is sent in clear text.")
     add(f"  username: {yaml_quote(username)}")
     add("  password: !secret adafruit_io_key")
     add(f"  keepalive: {int(conn['mqtt_keepalive'])}s")
@@ -580,9 +618,26 @@ def generate_yaml(cfg):
     add('# wifi_password: "YOUR_WIFI_PASSWORD"')
     add('# ota_password: "YOUR_OTA_PASSWORD"')
     add('# adafruit_io_key: "YOUR_ADAFRUIT_IO_KEY"')
+    add('# api_encryption_key: "BASE64 KEY, 32 RANDOM BYTES (the configurator generates it)"')
     if firmware_url:
         add('# github_token: "READ-ONLY FINE-GRAINED TOKEN OF THE PRIVATE FIRMWARE REPO"')
     return "\n".join(lines) + "\n"
+
+
+def security_warnings(cfg):
+    """Things the user should confirm before generating firmware (not validation errors)."""
+    warnings = []
+    port = int(cfg["connections"].get("mqtt_port", 0))
+    if port != TLS_MQTT_PORT:
+        warnings.append(
+            f"MQTT port {port} is not encrypted: your Adafruit IO key and every command travel in clear text. "
+            f"Use port {TLS_MQTT_PORT} (TLS).")
+    return warnings
+
+
+def new_api_key():
+    """A fresh ESPHome API encryption key (32 random bytes, base64)."""
+    return base64.b64encode(token_bytes(32)).decode("ascii")
 
 
 def write_project_files(cfg, directory):
@@ -909,6 +964,7 @@ class Configurator(tk.Tk):
         self.wifi_password = tk.StringVar()
         self.ota_password = tk.StringVar()
         self.github_token = tk.StringVar()
+        self.api_key = tk.StringVar()
         self.firmware_url = tk.StringVar()
         self.firmware_repo = tk.StringVar()
         self.status_led_gpio = tk.StringVar()
@@ -1438,6 +1494,7 @@ class Configurator(tk.Tk):
             ("Wi-Fi SSID", self.wifi_ssid, {}),
             ("Wi-Fi password", self.wifi_password, secret),
             ("OTA password", self.ota_password, secret),
+            ("API encryption key", self.api_key, {**secret, "width": 50}),
         ))
         self._form(self._card(inner, "Remote firmware update (optional)"), (
             ("Firmware .bin URL", self.firmware_url, {"width": 60}),
@@ -1576,9 +1633,13 @@ class Configurator(tk.Tk):
         self.ota_password.set(str(secrets.get("ota_password", "")))
         self.mqtt_key.set(str(secrets.get("adafruit_io_key", "")))
         self.github_token.set(str(secrets.get("github_token", "")))
+        self.api_key.set(str(secrets.get("api_encryption_key", "")))
 
     def _collect_secrets(self):
+        if not self.api_key.get().strip():
+            self.api_key.set(new_api_key())
         return {
+            "api_encryption_key": self.api_key.get().strip(),
             "wifi_ssid": self.wifi_ssid.get(),
             "wifi_password": self.wifi_password.get(),
             "ota_password": self.ota_password.get(),
@@ -1671,9 +1732,14 @@ class Configurator(tk.Tk):
         else:
             self.set_status(f"Loaded {Path(path).name}.", "ok")
 
+    def _confirm_security(self, cfg):
+        warnings = security_warnings(cfg)
+        return not warnings or messagebox.askyesno(
+            "Unencrypted connection", "\n\n".join(warnings) + "\n\nContinue anyway?")
+
     def save_yaml(self):
         cfg = self._checked_config()
-        if not cfg:
+        if not cfg or not self._confirm_security(cfg):
             return
         path = filedialog.asksaveasfilename(
             title="Generate ESPHome configuration", defaultextension=".yaml", initialdir=SCRIPT_DIR,
@@ -1692,7 +1758,7 @@ class Configurator(tk.Tk):
 
     def publish_ui(self):
         cfg = self._checked_config()
-        if not cfg:
+        if not cfg or not self._confirm_security(cfg):
             return
         if not messagebox.askyesno(
                 "Publish firmware",

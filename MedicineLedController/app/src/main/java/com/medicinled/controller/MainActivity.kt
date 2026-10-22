@@ -215,7 +215,9 @@ class MainActivity : Activity() {
             status.text = "Controlla broker, porta, username e AIO Key."; return
         }
         AppSettings.save(this, connection)
-        status.text = "Impostazioni salvate su questo telefono."
+        status.text = "Impostazioni salvate su questo telefono." +
+            if (connection.port == 8883 || connection.port == 443) "" else
+                "\nAttenzione: connessione non cifrata, la chiave AIO viaggia in chiaro. Usa la porta 8883."
         MqttController.reconnect()
     }
 }
