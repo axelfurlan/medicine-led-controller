@@ -22,7 +22,7 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
   - `strips`: up to 5. Each has `gpio`, `num_leds` and an ordered list of `segments`, each with `leds`, `gap_after` and the `moments` (ids) it belongs to.
   - `connections`: MQTT settings plus `command_feed` and `feedback_feed`.
   - `pulse`: `on_ms`, `off_ms` and `transition_ms`, used globally.
-- Segment LED indices are not stored. They are computed in order: each segment starts after the previous one plus its `gap_after`. Insulin pens are just strips with one segment; there is no special case.
+- Segment LED indices are not stored. They are computed in order: each segment starts after the previous one plus its `gap_after`. Insulin pens are just strips with one segment; there is no special case. The data is stored in shelf order (left to right), but the strip card lists the rows from the board (LED 0) to the far end, so with `right_to_left` the rows are shown reversed and the LED ranges always ascend down the table. The gaps (unlit LEDs) are positions on the shelf: `gap_before` on the strip (left end), `gap_after` on each segment (to its right; on the last segment it is the gap at the right end), and a gap keeps its position when segments are moved. A strip with `right_to_left: true` has LED 0 at the right end, so the numbering runs from the right (`compute_full_layout(segments, right_to_left, gap_before)`); the edge gaps count as used LEDs. Configs without `gap_before` are migrated on load: it is set to 0 and the old (ignored) last `gap_after` is zeroed.
 - On startup the GUI auto-loads `configuration.json` and `secrets.yaml` from the script folder. If the JSON isn't version 3, it starts from `default_config()` instead. The suggested GPIOs (`SUGGESTED_GPIOS`: 16, 17, 18, 19, 21) are the ones wired on the current hardware.
 - Credentials (`wifi_ssid`, `wifi_password`, `ota_password`, `adafruit_io_key`) go only into `secrets.yaml` (gitignored). The YAML references them via `!secret`. Never embed them in the YAML or JSON.
 
@@ -34,11 +34,15 @@ There are no tests. `.esphome/` (ESPHome build output) is git-ignored; ignore it
 - `rmt_symbols` is 128 for up to 4 strips and 64 for 5, so the ESP32's 512 RMT symbols are not exceeded.
 - The device publishes feedback to the feedback feed: `OK:<moment id>`, `OK:spento` (off) or `ERRORE:payload_non_valido`. The moment IDs `nessuna`, `spento`, `errore` and `off` are reserved. Unknown command payloads get `ERRORE:payload_non_valido` from a catch-all handler.
 
+## On-board status LED (optional)
+
+Top-level `status_led_gpio` (null = off; the blue LED is GPIO 2 on typical ESP32 dev boards) adds a `switch` + `led_stato` script for diagnosing boots without USB: solid = firmware started; then N pulses = `esp_reset_reason()` (1 power-on, 2 reset button, 3 software, 4 crash, 5 interrupt watchdog, 6 task watchdog, 7 other watchdog, 9 brownout); then fast blink = no Wi-Fi, slow blink = Wi-Fi but no MQTT, short flash every 2 s = all connected. No LED at all means the firmware did not start (or ESPHome safe mode). It must not share a GPIO with a strip.
+
 ## Remote OTA (optional)
 
 Set `connections.firmware_url` (HTTPS raw URL of `firmware.ota.bin` in a **private** repo; `<url>.md5` must sit beside it) and the `github_token` secret (read-only fine-grained token). The generator then adds `http_request`, `ota: http_request` and an `update` payload on the command feed: the device acks `OK:aggiornamento`, downloads with basic auth (`x-access-token` + token) and reboots. `update` is a reserved moment id. The LAN `ota: esphome` stays as fallback. Never publish the `.bin` in a public repo: it embeds Wi-Fi, AIO and OTA secrets.
 
-Release: click **Publish firmware…** in the configurator (bottom bar). It regenerates `led-farmaci.yaml`/`configuration.json`/`secrets.yaml`, runs `esphome compile`, copies `firmware.ota.bin` + `.md5` into the local clone (`connections.firmware_repo`, default `../farmaci-firmware`, cloned if missing) and commits/pushes with the user's git credentials. Then tap "Aggiorna firmware ESP32" in the app settings (confirmation dialog; not in the overlay panel). `esphome` is on the user PATH; the configurator also falls back to the ESPHome Device Builder `Scripts\esphome.exe`. The first flash with this firmware still goes over the LAN with `esphome run led-farmaci.yaml --device <ip>`.
+Release: click **Publish firmware…** in the configurator (bottom bar). It regenerates `led-farmaci.yaml`/`configuration.json`/`secrets.yaml`, runs `esphome compile`, copies `firmware.ota.bin` + `.md5` into the local clone (`connections.firmware_repo`, default `../farmaci-firmware`, cloned if missing) and commits/pushes with the user's git credentials. Then tap "Aggiorna firmware ESP32" in the app settings (confirmation dialog; not in the overlay panel). The configurator runs ESPHome with the ESPHome Device Builder's `python.exe -m esphome` when that is installed, otherwise `esphome` from PATH. The first flash with this firmware still goes over the LAN with `esphome run led-farmaci.yaml --device <ip>`.
 
 ## MQTT protocol (shared contract)
 

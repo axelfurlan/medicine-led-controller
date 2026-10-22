@@ -115,7 +115,9 @@
             "non_dialysis_days_medicines"
           ]
         }
-      ]
+      ],
+      "gap_before": 0,
+      "right_to_left": false
     },
     {
       "name": "Meals insulin pen",
@@ -130,7 +132,9 @@
             "meals_insulin_pen"
           ]
         }
-      ]
+      ],
+      "gap_before": 0,
+      "right_to_left": false
     },
     {
       "name": "Night insulin pen",
@@ -145,7 +149,9 @@
             "night_insulin_pen"
           ]
         }
-      ]
+      ],
+      "gap_before": 0,
+      "right_to_left": false
     }
   ],
   "connections": {
@@ -166,5 +172,6 @@
     "on_ms": 700,
     "off_ms": 400,
     "transition_ms": 400
-  }
+  },
+  "status_led_gpio": null
 }

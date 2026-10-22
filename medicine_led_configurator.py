@@ -112,10 +112,10 @@ def default_config():
         "device_name": DEVICE_NAME,
         "moments": moments,
         "strips": [
-            {"name": "Medicine shelf", "gpio": 18, "num_leds": 62, "segments": shelf},
-            {"name": "Meals insulin pen", "gpio": 19, "num_leds": 6, "segments": [
+            {"name": "Medicine shelf", "gpio": 18, "num_leds": 62, "gap_before": 0, "segments": shelf},
+            {"name": "Meals insulin pen", "gpio": 19, "num_leds": 6, "gap_before": 0, "segments": [
                 {"name": "Meals insulin pen", "leds": 6, "gap_after": 0, "moments": ["meals_insulin_pen"]}]},
-            {"name": "Night insulin pen", "gpio": 21, "num_leds": 6, "segments": [
+            {"name": "Night insulin pen", "gpio": 21, "num_leds": 6, "gap_before": 0, "segments": [
                 {"name": "Night insulin pen", "leds": 6, "gap_after": 0, "moments": ["night_insulin_pen"]}]},
         ],
         "connections": {
@@ -129,33 +129,60 @@ def default_config():
             "firmware_repo": "",
         },
         "pulse": dict(DEFAULT_PULSE),
+        "status_led_gpio": None,
     }
 
 
 def migrate_config(cfg):
-    """Upgrade a version 2 configuration (one feed per moment) to version 3 (one command feed)."""
-    if not isinstance(cfg, dict) or cfg.get("version") != 2:
+    """Upgrade older files: version 2 (one feed per moment) to 3 (one command feed), and strips without edge gaps."""
+    if not isinstance(cfg, dict):
         return cfg
-    cfg = json.loads(json.dumps(cfg))
-    cfg["version"] = CONFIG_VERSION
-    cfg["moments"] = [{"id": m["id"], "name": m["name"]} for m in cfg.get("moments", [])]
-    conn = cfg.setdefault("connections", {})
-    conn.pop("all_off_feed", None)
-    conn.pop("topics", None)
-    conn["command_feed"] = DEFAULT_COMMAND_FEED
-    conn.setdefault("feedback_feed", DEFAULT_FEEDBACK_FEED)
+    if cfg.get("version") == 2:
+        cfg = json.loads(json.dumps(cfg))
+        cfg["version"] = CONFIG_VERSION
+        cfg["moments"] = [{"id": m["id"], "name": m["name"]} for m in cfg.get("moments", [])]
+        conn = cfg.setdefault("connections", {})
+        conn.pop("all_off_feed", None)
+        conn.pop("topics", None)
+        conn["command_feed"] = DEFAULT_COMMAND_FEED
+        conn.setdefault("feedback_feed", DEFAULT_FEEDBACK_FEED)
+    if cfg.get("version") == CONFIG_VERSION and any("gap_before" not in s for s in cfg.get("strips", [])):
+        cfg = json.loads(json.dumps(cfg))
+        for strip in cfg["strips"]:
+            if "gap_before" not in strip:
+                # Before edge gaps existed, the gap after the last segment was ignored; keep the layout identical.
+                strip["gap_before"] = 0
+                if strip.get("segments"):
+                    strip["segments"][-1]["gap_after"] = 0
     return cfg
 
 
-def compute_layout(segments):
-    """Return ([(start, end) per segment], used_leds); segments are laid out in order."""
-    ranges, pos = [], 0
-    for seg in segments:
-        start = pos
-        end = start + seg["leds"] - 1
-        ranges.append((start, end))
-        pos = end + 1 + seg["gap_after"]
-    used = ranges[-1][1] + 1 if ranges else 0
+def compute_full_layout(segments, right_to_left=False, gap_before=0):
+    """Return (segment ranges, gap ranges, used_leds) for a strip.
+
+    Segments are listed as seen on the shelf, left to right, with a gap before the first one (gap_before), one
+    after every segment (gap_after, so the last one is the gap at the right end) and nothing else. LED 0 sits at
+    the left end, or at the right end when right_to_left. Ranges are (start, end) LED indices; the segment ranges
+    follow the list order, gap_ranges has len(segments) + 1 entries (index 0 = before the first segment,
+    index i + 1 = after segment i) and None for an empty gap. used_leds counts the gaps at both ends too.
+    """
+    items = [("gap", 0, gap_before)]
+    for i, seg in enumerate(segments):
+        items.append(("seg", i, seg["leds"]))
+        items.append(("gap", i + 1, seg["gap_after"]))
+    if right_to_left:
+        items.reverse()
+    seg_ranges, gap_ranges, pos = [None] * len(segments), [None] * (len(segments) + 1), 0
+    for kind, index, size in items:
+        span = (pos, pos + size - 1) if size > 0 else None
+        (seg_ranges if kind == "seg" else gap_ranges)[index] = span
+        pos += size
+    return seg_ranges, gap_ranges, pos
+
+
+def compute_layout(segments, right_to_left=False, gap_before=0):
+    """Return ([(start, end) per segment, in list order], used_leds); see compute_full_layout."""
+    ranges, _, used = compute_full_layout(segments, right_to_left, gap_before)
     return ranges, used
 
 
@@ -207,6 +234,9 @@ def validate_config(cfg):
             errors.append(f"Strip '{label}' has no segments.")
 
         layout_ok = True
+        if strip.get("gap_before", 0) < 0:
+            errors.append(f"Strip '{label}': the gap at the start cannot be negative.")
+            layout_ok = False
         for j, seg in enumerate(strip["segments"], start=1):
             seg_label = seg["name"] or f"{label}, segment {j}"
             if not seg["name"]:
@@ -226,9 +256,16 @@ def validate_config(cfg):
                 if moment_id not in moment_ids:
                     errors.append(f"Segment '{seg_label}' refers to unknown moment '{moment_id}'.")
         if layout_ok and strip["segments"]:
-            _, used = compute_layout(strip["segments"])
+            _, used = compute_layout(strip["segments"], strip.get("right_to_left", False), strip.get("gap_before", 0))
             if used > strip["num_leds"]:
                 errors.append(f"Strip '{label}' needs {used} LEDs but has only {strip['num_leds']}.")
+
+    status_gpio = cfg.get("status_led_gpio")
+    if status_gpio is not None:
+        if status_gpio not in VALID_OUTPUT_GPIOS:
+            errors.append(f"Status LED: GPIO {status_gpio} cannot be used as an output.")
+        elif status_gpio in gpios:
+            errors.append(f"Status LED: GPIO {status_gpio} is already used by '{gpios[status_gpio]}'.")
 
     pulse = cfg.get("pulse", {})
     on_ms, off_ms, transition_ms = pulse.get("on_ms", 0), pulse.get("off_ms", 0), pulse.get("transition_ms", -1)
@@ -257,6 +294,7 @@ def generate_yaml(cfg):
     on_ms, off_ms, transition_ms = int(pulse["on_ms"]), int(pulse["off_ms"]), int(pulse["transition_ms"])
     username = conn["mqtt_username"].strip()
     firmware_url = conn.get("firmware_url", "").strip()
+    status_gpio = cfg.get("status_led_gpio")
     feedback_topic = mqtt_topic(username, conn["feedback_feed"])
     command_topic = mqtt_topic(username, conn["command_feed"])
     moments = cfg["moments"]
@@ -267,7 +305,7 @@ def generate_yaml(cfg):
 
     segments = []
     for n, strip in enumerate(strips, start=1):
-        ranges, _ = compute_layout(strip["segments"])
+        ranges, _ = compute_layout(strip["segments"], strip.get("right_to_left", False), strip.get("gap_before", 0))
         for m, (seg, (start, end)) in enumerate(zip(strip["segments"], ranges), start=1):
             segments.append({
                 "id": f"seg_{n}_{m}", "name": seg["name"], "strip_id": f"strip_{n}",
@@ -344,6 +382,8 @@ def generate_yaml(cfg):
     add("  on_boot:")
     add("    - priority: 600")
     add("      then:")
+    if status_gpio is not None:
+        add("        - script.execute: led_stato")
     set_mode(" " * 8, "nessuna", connected=False)
     all_red(" " * 8)
     add("        - script.execute: lampeggio_errore")
@@ -372,7 +412,14 @@ def generate_yaml(cfg):
     add("")
     add("logger:")
     add("  level: DEBUG")
-    add("")
+    if status_gpio is not None:
+        add("switch:")
+        add("  - platform: gpio")
+        add(f"    pin: GPIO{status_gpio}")
+        add("    id: led_blu")
+        add("    internal: true")
+        add("    restore_mode: ALWAYS_ON")
+        add("")
     add("globals:")
     add("  - id: mqtt_connesso")
     add("    type: bool")
@@ -457,6 +504,51 @@ def generate_yaml(cfg):
             blink_loop(" " * 12, selected, 0, 100)
         else:
             add("            - delay: 1200ms")
+
+    if status_gpio is not None:
+        led = lambda state, pad: add(f"{pad}- switch.turn_{state}: led_blu")
+        pad = " " * 6
+        add("")
+        add("  # On-board LED legend: solid = firmware started; then N pulses = reset reason (1 power-on,")
+        add("  # 2 reset button, 3 software, 4 crash, 5 int. watchdog, 6 task watchdog, 7 other watchdog,")
+        add("  # 9 brownout); then fast blink = no Wi-Fi, slow blink = no MQTT, short flash every 2 s = all OK.")
+        add("  - id: led_stato")
+        add("    mode: single")
+        add("    then:")
+        add(f"{pad}- delay: 1s")
+        led("off", pad)
+        add(f"{pad}- delay: 800ms")
+        add(f"{pad}- repeat:")
+        add(f"{pad}    count: !lambda 'return (int) esp_reset_reason();'")
+        add(f"{pad}    then:")
+        for state, ms in (("on", 200), ("off", 300)):
+            led(state, pad + "      ")
+            add(f"{pad}      - delay: {ms}ms")
+        add(f"{pad}- delay: 1500ms")
+        add(f"{pad}- while:")
+        add(f"{pad}    condition:")
+        add(f"{pad}      lambda: 'return true;'")
+        add(f"{pad}    then:")
+        add(f"{pad}      - if:")
+        add(f"{pad}          condition:")
+        add(f"{pad}            not:")
+        add(f"{pad}              wifi.connected:")
+        add(f"{pad}          then:")
+        for state, ms in (("on", 100), ("off", 100)):
+            led(state, pad + "            ")
+            add(f"{pad}            - delay: {ms}ms")
+        add(f"{pad}          else:")
+        add(f"{pad}            - if:")
+        add(f"{pad}                condition:")
+        add(f"{pad}                  lambda: 'return !id(mqtt_connesso);'")
+        add(f"{pad}                then:")
+        for state, ms in (("on", 500), ("off", 500)):
+            led(state, pad + "                  ")
+            add(f"{pad}                  - delay: {ms}ms")
+        add(f"{pad}                else:")
+        for state, ms in (("on", 50), ("off", 1950)):
+            led(state, pad + "                  ")
+            add(f"{pad}                  - delay: {ms}ms")
 
     add("")
     add("light:")
@@ -643,6 +735,13 @@ def apply_dark_theme(root):
     flat_button("Accent.TButton", c["accent"], "#ffffff", c["accent_hover"], padding=(16, 7),
                 font=(FONT, 10, "bold"))
     flat_button("Ghost.TButton", c["card"], c["accent"], c["input"], padding=(8, 5), font=(FONT, 10, "bold"))
+    # Two-state segmented switch (ttk.Radiobutton buttons): the selected side is filled with the accent colour.
+    flat_button("Segment.Toolbutton", c["input"], c["muted"], c["hover"], padding=(18, 5), font=(FONT, 10, "bold"))
+    style.map("Segment.Toolbutton",
+              background=[("selected", c["accent"]), ("pressed", c["hover"]), ("active", c["hover"])],
+              foreground=[("selected", "#ffffff")],
+              bordercolor=[("selected", c["accent"])], lightcolor=[("selected", c["accent"])],
+              darkcolor=[("selected", c["accent"])])
     # A symbol font with monochrome glyphs, so Windows does not fall back to colour emoji.
     for name, fg in (("Icon.TButton", c["muted"]), ("Danger.TButton", c["danger"])):
         flat_button(name, c["card"], fg, c["input"], padding=(4, 2), width=2, font=("Segoe UI Symbol", 10))
@@ -773,8 +872,12 @@ class StripModel:
         self.name = tk.StringVar(value=str(data.get("name", "")))
         self.gpio = tk.StringVar(value=str(data.get("gpio", "")))
         self.num_leds = tk.StringVar(value=str(data.get("num_leds", 6)))
+        self.gap_before = tk.StringVar(value=str(data.get("gap_before", 0)))
+        self.right_to_left = tk.BooleanVar(value=bool(data.get("right_to_left", False)))
         self.segments = [SegmentRow(app, self, s) for s in data.get("segments", [])]
         self.num_leds.trace_add("write", lambda *_: app.on_layout_changed(self))
+        self.gap_before.trace_add("write", lambda *_: app.on_layout_changed(self))
+        self.right_to_left.trace_add("write", lambda *_: app.after_idle(app.render_strips))
         self.view = None  # widgets of the currently rendered card
 
 
@@ -808,6 +911,7 @@ class Configurator(tk.Tk):
         self.github_token = tk.StringVar()
         self.firmware_url = tk.StringVar()
         self.firmware_repo = tk.StringVar()
+        self.status_led_gpio = tk.StringVar()
         self.mqtt_broker = tk.StringVar()
         self.mqtt_port = tk.StringVar()
         self.mqtt_username = tk.StringVar()
@@ -945,6 +1049,9 @@ class Configurator(tk.Tk):
         ttk.Spinbox(toolbar, from_=1, to=MAX_STRIPS, width=4, textvariable=self.strip_count, state="readonly",
                     command=self.on_strip_count_changed).pack(side="left", padx=10)
         ttk.Label(toolbar, text=f"max {MAX_STRIPS}", style="PageSub.TLabel").pack(side="left")
+        ttk.Label(toolbar, text="On-board status LED GPIO").pack(side="left", padx=(36, 0))
+        ttk.Combobox(toolbar, textvariable=self.status_led_gpio, values=(2,), width=5).pack(side="left", padx=10)
+        ttk.Label(toolbar, text="empty = off", style="PageSub.TLabel").pack(side="left")
         for index, strip in enumerate(self.strips):
             self._build_strip_card(inner, index, strip)
         self._strips_dirty = False
@@ -963,30 +1070,64 @@ class Configurator(tk.Tk):
         usage = ttk.Label(head, style="CardMuted.TLabel")
         usage.pack(side="right")
 
+        side = ttk.Frame(card, style="Card.TFrame")
+        side.pack(fill="x", pady=(10, 0))
+        ttk.Label(side, text="Board side (LED 0)", style="CardMuted.TLabel").pack(side="left", padx=(0, 12))
+        for text, value in (("Left", False), ("Right", True)):
+            ttk.Radiobutton(side, text=text, value=value, variable=strip.right_to_left,
+                            style="Segment.Toolbutton").pack(side="left")
+        ttk.Label(side, text="The first row is always the one next to the board; switching sides reverses the rows.",
+                  style="CardMuted.TLabel").pack(side="left", padx=(14, 0))
+
         bar = tk.Canvas(card, height=18, highlightthickness=0, bd=0, background=COLORS["card"])
         bar.pack(fill="x", pady=(14, 14))
 
         table = ttk.Frame(card, style="Card.TFrame")
         table.pack(fill="x")
-        table.columnconfigure(5, weight=1)
-        for col, text in enumerate(("", "SEGMENT", "LEDS", "GAP AFTER", "LED RANGE", "MOMENTS", "")):
+        table.columnconfigure(4, weight=1)
+        for col, text in enumerate(("", "SEGMENT / GAP", "LEDS", "LED RANGE", "MOMENTS", "")):
             ttk.Label(table, text=text, style="ColHead.TLabel").grid(row=0, column=col, sticky="w", padx=4,
                                                                      pady=(0, 6))
-        range_labels = []
-        for row, seg in enumerate(strip.segments, start=1):
-            color = SEGMENT_COLORS[(row - 1) % len(SEGMENT_COLORS)]
+        count = len(strip.segments)
+        reverse = strip.right_to_left.get()
+        # Rows run from the board (LED 0) to the far end; the data stays in shelf order (left to right).
+        led_segments = strip.segments[::-1] if reverse else strip.segments
+        led_gaps = ([strip.gap_before] + [seg.gap for seg in strip.segments])
+        if reverse:
+            led_gaps.reverse()
+        range_labels, gap_labels = [None] * count, [None] * (count + 1)
+
+        def gap_row(row, caption, var, gap_index):
+            """A gap between two segments, or at one end of the strip."""
+            tk.Frame(table, background=COLORS["border"], width=5, height=2).grid(row=row, column=0, sticky="ew",
+                                                                                 padx=(0, 6))
+            ttk.Label(table, text=caption, style="CardMuted.TLabel").grid(row=row, column=1, sticky="e", padx=4,
+                                                                          pady=2)
+            ttk.Spinbox(table, from_=0, to=99, width=4, textvariable=var).grid(row=row, column=2, sticky="nw",
+                                                                              padx=4, pady=2)
+            label = ttk.Label(table, style="CardMuted.TLabel", width=9)
+            label.grid(row=row, column=3, sticky="nw", padx=4, pady=4)
+            gap_labels[gap_index] = label
+
+        if count:
+            gap_row(1, "gap · at the board", led_gaps[0], count if reverse else 0)
+        for position, seg in enumerate(led_segments):
+            row = 2 + 2 * position
+            data_index = count - 1 - position if reverse else position
+            color = SEGMENT_COLORS[data_index % len(SEGMENT_COLORS)]
             tk.Frame(table, background=color, width=5).grid(row=row, column=0, sticky="ns", padx=(0, 6), pady=5)
             ttk.Entry(table, textvariable=seg.name, width=22).grid(row=row, column=1, sticky="nw", padx=4, pady=4)
             ttk.Spinbox(table, from_=1, to=999, width=4, textvariable=seg.leds).grid(row=row, column=2,
                                                                                     sticky="nw", padx=4, pady=4)
-            ttk.Spinbox(table, from_=0, to=99, width=4, textvariable=seg.gap).grid(row=row, column=3,
-                                                                                  sticky="nw", padx=4, pady=4)
             range_label = ttk.Label(table, style="CardMuted.TLabel", width=9)
-            range_label.grid(row=row, column=4, sticky="nw", padx=4, pady=7)
-            range_labels.append(range_label)
+            range_label.grid(row=row, column=3, sticky="nw", padx=4, pady=7)
+            range_labels[data_index] = range_label
+            last = position == count - 1
+            gap_row(row + 1, "gap · at the far end" if last else "gap", led_gaps[position + 1],
+                    count - 1 - position if reverse else position + 1)
 
             checks = ttk.Frame(table, style="Card.TFrame")
-            checks.grid(row=row, column=5, sticky="nw", padx=4, pady=4)
+            checks.grid(row=row, column=4, sticky="nw", padx=4, pady=4)
             for k, moment in enumerate(self.moments):
                 ttk.Checkbutton(checks, text=moment.label(), variable=seg.checks[moment],
                                 style="Card.TCheckbutton").grid(row=k // MOMENT_COLUMNS, column=k % MOMENT_COLUMNS,
@@ -995,40 +1136,46 @@ class Configurator(tk.Tk):
                 ttk.Label(checks, text="Define moments first.", style="CardMuted.TLabel").grid(row=0, column=0)
 
             self._row_actions(
-                table, row - 1, len(strip.segments),
-                lambda delta, s=seg: self.move_segment(strip, s, delta),
+                table, position, count,
+                lambda delta, s=seg: self.move_segment(strip, s, -delta if strip.right_to_left.get() else delta),
                 lambda s=seg: self.remove_segment(strip, s),
-            ).grid(row=row, column=6, sticky="ne", padx=(4, 0), pady=4)
+            ).grid(row=row, column=5, sticky="ne", padx=(4, 0), pady=4)
 
         if not strip.segments:
-            ttk.Label(table, text="No segments yet.", style="CardMuted.TLabel").grid(row=1, column=1, columnspan=5,
+            ttk.Label(table, text="No segments yet.", style="CardMuted.TLabel").grid(row=1, column=1, columnspan=4,
                                                                                     sticky="w", padx=4)
         ttk.Button(card, text="+ Add segment", style="Ghost.TButton",
                    command=lambda: self.add_segment(strip)).pack(anchor="w", pady=(10, 0))
 
-        strip.view = {"usage": usage, "bar": bar, "ranges": range_labels}
+        strip.view = {"usage": usage, "bar": bar, "ranges": range_labels, "gaps": gap_labels}
         bar.bind("<Configure>", lambda _e: self._update_strip_view(strip))
         self._update_strip_view(strip)
 
     def _strip_layout(self, strip):
-        """Layout from the current (possibly invalid) widget values: (ranges or None, used or None, num or None)."""
+        """Layout from the current (possibly invalid) widget values: (ranges, gap ranges, used, num); None if invalid."""
         num = parse_int(strip.num_leds.get())
+        before = parse_int(strip.gap_before.get())
         segments = []
         for seg in strip.segments:
             leds, gap = parse_int(seg.leds.get()), parse_int(seg.gap.get())
             if leds is None or leds < 1 or gap is None or gap < 0:
-                return None, None, num
+                return None, None, None, num
             segments.append({"leds": leds, "gap_after": gap})
-        ranges, used = compute_layout(segments)
-        return ranges, used, num
+        if before is None or before < 0:
+            return None, None, None, num
+        ranges, gaps, used = compute_full_layout(segments, strip.right_to_left.get(), before)
+        return ranges, gaps, used, num
 
     def _update_strip_view(self, strip):
         view = strip.view
         if not view:
             return
-        ranges, used, num = self._strip_layout(strip)
+        ranges, gaps, used, num = self._strip_layout(strip)
         for i, label in enumerate(view["ranges"]):
             label.configure(text=f"{ranges[i][0]} – {ranges[i][1]}" if ranges else "—")
+        for i, label in enumerate(view["gaps"]):
+            span = gaps[i] if gaps else None
+            label.configure(text="—" if not span else f"{span[0]}" if span[0] == span[1] else f"{span[0]} – {span[1]}")
         if used is None:
             view["usage"].configure(text="Check the LED counts", foreground=COLORS["danger"])
         elif num is None:
@@ -1086,7 +1233,7 @@ class Configurator(tk.Tk):
         used = {parse_int(s.gpio.get()) for s in self.strips}
         gpio = next((g for g in SUGGESTED_GPIOS if g not in used), "")
         return {
-            "name": f"Strip {len(self.strips) + 1}", "gpio": gpio, "num_leds": 6,
+            "name": f"Strip {len(self.strips) + 1}", "gpio": gpio, "num_leds": 6, "gap_before": 0,
             "segments": [{"name": self._unique_segment_name(), "leds": 6, "gap_after": 0, "moments": []}],
         }
 
@@ -1098,13 +1245,24 @@ class Configurator(tk.Tk):
         return f"Segment {n}"
 
     def add_segment(self, strip):
-        last = strip.segments[-1] if strip.segments else None
-        strip.segments.append(SegmentRow(self, strip, {
-            "name": self._unique_segment_name(),
-            "leds": last.leds.get() if last else 6,
-            "gap_after": last.gap.get() if last else 1,
-            "moments": [],
-        }))
+        """Append a segment at the far end of the strip (the bottom row); the gap at that end stays there."""
+        reverse = strip.right_to_left.get()
+        segments = strip.segments
+        far = segments[0] if reverse and segments else segments[-1] if segments else None
+        # The gap that now sits between the old and the new segment repeats the previous spacing.
+        neighbour = segments[0] if reverse and len(segments) >= 2 else segments[-2] if len(segments) >= 2 else None
+        between = neighbour.gap.get() if neighbour else "1"
+        data = {"name": self._unique_segment_name(), "leds": far.leds.get() if far else 6, "gap_after": "0",
+                "moments": []}
+        if reverse:
+            # Far end is the start of the shelf-ordered list; its gap is strip.gap_before and stays there.
+            data["gap_after"] = between if far else "0"
+            segments.insert(0, SegmentRow(self, strip, data))
+        else:
+            data["gap_after"] = far.gap.get() if far else "0"
+            segments.append(SegmentRow(self, strip, data))
+            if far:
+                far.gap.set(between)
         self.render_strips()
 
     def move_segment(self, strip, seg, delta):
@@ -1112,9 +1270,16 @@ class Configurator(tk.Tk):
         j = i + delta
         if 0 <= j < len(strip.segments):
             strip.segments[i], strip.segments[j] = strip.segments[j], strip.segments[i]
+            # The gap is part of the shelf position, not of the segment, so it stays where it was.
+            gap_i, gap_j = strip.segments[i].gap.get(), strip.segments[j].gap.get()
+            strip.segments[i].gap.set(gap_j)
+            strip.segments[j].gap.set(gap_i)
             self.render_strips()
 
     def remove_segment(self, strip, seg):
+        i = strip.segments.index(seg)
+        if i == len(strip.segments) - 1 and i > 0:
+            strip.segments[i - 1].gap.set(seg.gap.get())  # the gap at the end stays at the end
         strip.segments.remove(seg)
         self.render_strips()
 
@@ -1338,6 +1503,8 @@ class Configurator(tk.Tk):
                 "name": strip_name,
                 "gpio": number(strip.gpio, f"{strip_name}: GPIO"),
                 "num_leds": number(strip.num_leds, f"{strip_name}: physical LEDs"),
+                "right_to_left": strip.right_to_left.get(),
+                "gap_before": number(strip.gap_before, f"{strip_name}: gap at the start"),
                 "segments": segments,
             })
 
@@ -1369,6 +1536,7 @@ class Configurator(tk.Tk):
                 "off_ms": number(self.pulse_off, "LED off time"),
                 "transition_ms": number(self.pulse_transition, "Fade time"),
             },
+            "status_led_gpio": number(self.status_led_gpio, "Status LED GPIO") if self.status_led_gpio.get().strip() else None,
         }
 
     def load_config(self, cfg):
@@ -1395,6 +1563,7 @@ class Configurator(tk.Tk):
         self.pulse_on.set(str(pulse["on_ms"]))
         self.pulse_off.set(str(pulse["off_ms"]))
         self.pulse_transition.set(str(pulse["transition_ms"]))
+        self.status_led_gpio.set("" if cfg.get("status_led_gpio") is None else str(cfg["status_led_gpio"]))
 
         self.render_strips()
         self.render_moments()
